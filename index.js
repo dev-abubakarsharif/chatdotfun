@@ -106,5 +106,6 @@ app.post("/incoming", (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// Start server
-app.listen(3000, () => console.log("Bot running on http://localhost:3000"));
+// Start server (Render-compatible)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
