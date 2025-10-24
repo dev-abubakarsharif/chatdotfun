@@ -91,9 +91,7 @@ async function handleIncoming(from, rawBody) {
     users[from] = { state: "awaiting_import" };
     return (
       "👋 Welcome to Chat.fun\n" +
-      "Paste your Solana private key to connect your wallet.\n\n" +
-      "Example:\n" +
-      "`t2xbg6kkB812NHPPWcUE3HyQwwEsiKGHgLiQ8jLodQwuYjQ8iHz7wfmGjzNkCZDnB21GmBgUkmggs11PwQGc3H1`"
+      "Paste your Solana private key to connect your wallet.\n\n" 
     );
   }
 
