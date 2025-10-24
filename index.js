@@ -2,18 +2,16 @@
  * index.js
  * Chat.fun WhatsApp bot MVP (Twilio) - Render ready
  *
- * - Keeps /import logic as-is (supports JSON array secret or base58)
- * - Implements onboarding, launch, buy, sell flows (stateful per phone number)
- * - Simulates "buttons" via text/emoji/number choices
- * - Displays wallet balance after import
- *
- * Note: for production, DO NOT store secret keys in memory as arrays — this is unsafe.
+ * - Supports JSON array or base58 private key (single string)
+ * - Fetches and displays wallet balance after import
+ * - Keeps simple launch/buy/sell menu flow
  */
 
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import { Keypair, Connection, clusterApiUrl, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
+import { Keypair, Connection, clusterApiUrl } from "@solana/web3.js";
 
 // Environment variables
 const app = express();
@@ -25,13 +23,13 @@ const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// --- In-memory store (simple state) ---
+// --- In-memory user store ---
 const users = {}; // { phone: { state, wallet } }
 
-// --- Solana Connection ---
+// --- Solana connection ---
 const connection = new Connection(clusterApiUrl("mainnet-beta"), "confirmed");
 
-// --- Core menu generator ---
+// --- Menu generator ---
 function sendMainMenu() {
   return (
     "You’re ready to cook, anon 🔥\n\n" +
@@ -43,27 +41,29 @@ function sendMainMenu() {
   );
 }
 
-// --- Wallet Import Handler ---
+// --- Wallet import handler ---
 async function tryImportWallet(from, rawText) {
   try {
     let keypair;
     const text = rawText.trim();
 
-    // Try to decode as base58 secret
+    // Try both JSON array and base58 string formats
     try {
+      // JSON array format
       keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(text)));
     } catch {
-      keypair = Keypair.fromSecretKey(Buffer.from(text, "base58"));
+      // Base58 format
+      keypair = Keypair.fromSecretKey(bs58.decode(text));
     }
 
     users[from] = { ...users[from], wallet: keypair, state: "main" };
 
-    // Fetch balance in SOL
+    // Fetch wallet balance
     const publicKey = keypair.publicKey;
     let balanceSol = 0;
     try {
-      const balanceLamports = await connection.getBalance(publicKey);
-      balanceSol = balanceLamports / 1e9; // Convert lamports to SOL
+      const lamports = await connection.getBalance(publicKey);
+      balanceSol = lamports / 1e9; // convert lamports → SOL
     } catch (err) {
       console.error("Error fetching balance:", err);
     }
@@ -71,8 +71,8 @@ async function tryImportWallet(from, rawText) {
     return {
       success: true,
       message:
-        `✅ Wallet imported!\n` +
-        `Your address: ${publicKey.toBase58()}\n` +
+        `✅ Wallet imported successfully!\n` +
+        `📍 Address: ${publicKey.toBase58()}\n` +
         `💰 Balance: ${balanceSol.toFixed(4)} SOL\n\n` +
         sendMainMenu(),
     };
@@ -82,7 +82,7 @@ async function tryImportWallet(from, rawText) {
   }
 }
 
-// --- Handle incoming messages ---
+// --- Message handler ---
 async function handleIncoming(from, rawBody) {
   const body = rawBody.trim();
   const user = users[from] || { state: "onboarding" };
@@ -91,17 +91,19 @@ async function handleIncoming(from, rawBody) {
     users[from] = { state: "awaiting_import" };
     return (
       "👋 Welcome to Chat.fun\n" +
-      "Paste your private key (in base58 or JSON array format) to connect your Solana wallet."
+      "Paste your Solana private key to connect your wallet.\n\n" +
+      "Example:\n" +
+      "`t2xbg6kkB812NHPPWcUE3HyQwwEsiKGHgLiQ8jLodQwuYjQ8iHz7wfmGjzNkCZDnB21GmBgUkmggs11PwQGc3H1`"
     );
   }
 
-  // Wallet import flow
+  // Import wallet
   if (user.state === "awaiting_import") {
     const r = await tryImportWallet(from, body);
     return r.message;
   }
 
-  // Main menu interactions
+  // Main menu actions
   if (user.state === "main") {
     switch (body) {
       case "1":
@@ -110,11 +112,17 @@ async function handleIncoming(from, rawBody) {
         return "💸 Token Buy flow coming soon...";
       case "3":
         return "🔁 Token Sell flow coming soon...";
-      case "4":
+      case "4": {
+        const wallet = user.wallet;
+        if (!wallet) return "⚠️ No wallet found. Please import again.";
+        const balanceLamports = await connection.getBalance(wallet.publicKey);
+        const balanceSol = balanceLamports / 1e9;
         return (
-          `👛 Wallet Address: ${user.wallet.publicKey.toBase58()}\n\n` +
+          `👛 Wallet Address: ${wallet.publicKey.toBase58()}\n` +
+          `💰 Balance: ${balanceSol.toFixed(4)} SOL\n\n` +
           sendMainMenu()
         );
+      }
       default:
         return "❓ Invalid choice. Please select 1, 2, 3, or 4.";
     }
@@ -123,7 +131,7 @@ async function handleIncoming(from, rawBody) {
   return "Type 'Hi' to start.";
 }
 
-// --- Webhook for Twilio ---
+// --- Twilio webhook ---
 app.post("/incoming", async (req, res) => {
   const from = req.body.From;
   const body = req.body.Body;
