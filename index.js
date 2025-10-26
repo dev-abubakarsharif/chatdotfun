@@ -1,38 +1,42 @@
 /**
  * index.js
- * Chat.fun WhatsApp bot MVP (Twilio) - Render ready
+ * Chat.fun WhatsApp/Render bot - Devnet version (No Twilio SID)
  *
- * - Supports JSON array or base58 private key (single string)
- * - Fetches and displays wallet balance after import
- * - Keeps simple launch/buy/sell menu flow
+ * ✅ Imports Solana wallet (JSON array or base58)
+ * ✅ Shows wallet balance after import
+ * ✅ Launches token on Devnet
+ * ✅ Buys token by name or address (simulation)
  */
 
 import express from "express";
 import bodyParser from "body-parser";
-import twilio from "twilio";
 import bs58 from "bs58";
 import { Keypair, Connection, clusterApiUrl } from "@solana/web3.js";
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+} from "@solana/spl-token";
 
-// Environment variables
+// --- Setup Express ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER;
-const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
 
-// Middleware
+// --- Middleware ---
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// --- In-memory user store ---
-const users = {}; // { phone: { state, wallet } }
+// --- In-memory user & token store ---
+const users = {}; // { phone: { state, wallet, lastToken } }
+const tokens = {}; // { name: { mintAddress, symbol, owner } }
 
-// --- Solana connection ---
-const connection = new Connection(clusterApiUrl("mainnet-beta"), "confirmed");
+// --- Solana Devnet connection ---
+const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
 
-// --- Menu generator ---
+// --- Menus ---
 function sendMainMenu() {
   return (
-    "You’re ready to cook, anon 🔥\n\n" +
+    "🔥 You’re ready to cook on Devnet 🔥\n\n" +
     "1️⃣ Launch Token\n" +
     "2️⃣ Buy Token\n" +
     "3️⃣ Sell Token\n" +
@@ -41,48 +45,101 @@ function sendMainMenu() {
   );
 }
 
-// --- Wallet import handler ---
+// --- Wallet Import ---
 async function tryImportWallet(from, rawText) {
   try {
     let keypair;
     const text = rawText.trim();
 
-    // Try both JSON array and base58 string formats
+    // JSON array or base58 secret
     try {
-      // JSON array format
       keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(text)));
     } catch {
-      // Base58 format
       keypair = Keypair.fromSecretKey(bs58.decode(text));
     }
 
     users[from] = { ...users[from], wallet: keypair, state: "main" };
 
-    // Fetch wallet balance
-    const publicKey = keypair.publicKey;
-    let balanceSol = 0;
-    try {
-      const lamports = await connection.getBalance(publicKey);
-      balanceSol = lamports / 1e9; // convert lamports → SOL
-    } catch (err) {
-      console.error("Error fetching balance:", err);
-    }
+    const lamports = await connection.getBalance(keypair.publicKey);
+    const balanceSol = lamports / 1e9;
 
-    return {
-      success: true,
-      message:
-        `✅ Wallet imported successfully!\n` +
-        `📍 Address: ${publicKey.toBase58()}\n` +
-        `💰 Balance: ${balanceSol.toFixed(4)} SOL\n\n` +
-        sendMainMenu(),
-    };
+    return (
+      `✅ Wallet imported successfully!\n` +
+      `📍 Address: ${keypair.publicKey.toBase58()}\n` +
+      `💰 Balance: ${balanceSol.toFixed(4)} SOL (Devnet)\n\n` +
+      sendMainMenu()
+    );
   } catch (err) {
     console.error("Wallet import failed:", err);
-    return { success: false, message: "❌ Invalid wallet format. Try again." };
+    return "❌ Invalid wallet format. Please paste a valid Solana private key.";
   }
 }
 
-// --- Message handler ---
+// --- Token Launch ---
+async function launchToken(from, name = "TestCoin", symbol = "TST") {
+  const user = users[from];
+  if (!user || !user.wallet)
+    return "⚠️ Please import your wallet first by typing 'Hi'.";
+
+  const wallet = user.wallet;
+
+  try {
+    const mint = await createMint(connection, wallet, wallet.publicKey, null, 9);
+    const mintAddress = mint.toBase58();
+
+    const tokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      wallet,
+      mint,
+      wallet.publicKey
+    );
+
+    await mintTo(
+      connection,
+      wallet,
+      mint,
+      tokenAccount.address,
+      wallet.publicKey,
+      1_000_000_000n // total supply (example)
+    );
+
+    tokens[name.toLowerCase()] = { mintAddress, symbol, owner: from };
+    users[from].lastToken = mintAddress;
+
+    return (
+      `🚀 Token launched successfully on Devnet!\n\n` +
+      `🪙 Name: ${name}\n` +
+      `💲 Symbol: ${symbol}\n` +
+      `📍 Address: ${mintAddress}\n` +
+      `🔗 Explorer: https://explorer.solana.com/address/${mintAddress}?cluster=devnet\n\n` +
+      sendMainMenu()
+    );
+  } catch (err) {
+    console.error("Token launch failed:", err);
+    return "❌ Token launch failed. Check logs for details.";
+  }
+}
+
+// --- Simulated Buy ---
+async function buyToken(from, query) {
+  if (!users[from] || !users[from].wallet)
+    return "⚠️ Import wallet first by typing 'Hi'.";
+
+  const token =
+    tokens[query.toLowerCase()] ||
+    Object.values(tokens).find((t) => t.mintAddress === query);
+
+  if (!token)
+    return "❌ Token not found. Try again with token name or address.";
+
+  return (
+    `💸 You bought 10 ${token.symbol} (${query}) successfully (simulation)\n` +
+    `🪙 Token Address: ${token.mintAddress}\n\n` +
+    sendMainMenu()
+  );
+}
+
+// --- Handle Incoming ---
 async function handleIncoming(from, rawBody) {
   const body = rawBody.trim();
   const user = users[from] || { state: "onboarding" };
@@ -90,31 +147,30 @@ async function handleIncoming(from, rawBody) {
   if (body.toLowerCase() === "hi" || body.toLowerCase() === "hello") {
     users[from] = { state: "awaiting_import" };
     return (
-      "👋 Welcome to Chat.fun\n" +
-      "Paste your Solana private key to connect your wallet.\n\n" 
+      "👋 Welcome to Chat.fun (Devnet mode)\n" +
+      "Paste your Solana private key to connect your wallet.\n\n" +
+      "💡 Use a Devnet wallet and get free SOL from https://faucet.solana.com"
     );
   }
 
-  // Import wallet
   if (user.state === "awaiting_import") {
-    const r = await tryImportWallet(from, body);
-    return r.message;
+    return await tryImportWallet(from, body);
   }
 
-  // Main menu actions
   if (user.state === "main") {
     switch (body) {
       case "1":
-        return "🚀 Token Launch flow coming soon...";
+        users[from].state = "launch_token_name";
+        return "🚀 Enter token name:";
       case "2":
-        return "💸 Token Buy flow coming soon...";
+        users[from].state = "buy_token_query";
+        return "💸 Enter token name or address to buy:";
       case "3":
-        return "🔁 Token Sell flow coming soon...";
+        return "🔁 Sell Token coming soon...";
       case "4": {
         const wallet = user.wallet;
-        if (!wallet) return "⚠️ No wallet found. Please import again.";
-        const balanceLamports = await connection.getBalance(wallet.publicKey);
-        const balanceSol = balanceLamports / 1e9;
+        const lamports = await connection.getBalance(wallet.publicKey);
+        const balanceSol = lamports / 1e9;
         return (
           `👛 Wallet Address: ${wallet.publicKey.toBase58()}\n` +
           `💰 Balance: ${balanceSol.toFixed(4)} SOL\n\n` +
@@ -122,25 +178,46 @@ async function handleIncoming(from, rawBody) {
         );
       }
       default:
-        return "❓ Invalid choice. Please select 1, 2, 3, or 4.";
+        return "❓ Invalid choice. Select 1, 2, 3, or 4.";
     }
+  }
+
+  if (user.state === "launch_token_name") {
+    users[from].tempName = body;
+    users[from].state = "launch_token_symbol";
+    return "Enter token symbol (e.g. TST):";
+  }
+
+  if (user.state === "launch_token_symbol") {
+    const name = user.tempName;
+    const symbol = body;
+    users[from].state = "main";
+    return await launchToken(from, name, symbol);
+  }
+
+  if (user.state === "buy_token_query") {
+    users[from].state = "main";
+    return await buyToken(from, body);
   }
 
   return "Type 'Hi' to start.";
 }
 
-// --- Twilio webhook ---
+// --- POST endpoint (for Render or frontend test) ---
 app.post("/incoming", async (req, res) => {
-  const from = req.body.From;
-  const body = req.body.Body;
+  const from = req.body.from || "guest";
+  const body = req.body.body || "";
 
   const reply = await handleIncoming(from, body);
-
-  const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(reply);
-  res.set("Content-Type", "text/xml");
-  res.send(twiml.toString());
+  res.json({ reply });
 });
 
-// --- Start server ---
-app.listen(PORT, () => console.log(`🚀 Chat.fun bot running on port ${PORT}`));
+// --- GET for testing on browser ---
+app.get("/", (req, res) => {
+  res.send("🚀 Chat.fun Devnet bot running successfully!");
+});
+
+// --- Start Server ---
+app.listen(PORT, () =>
+  console.log(`🚀 Chat.fun Devnet bot live on port ${PORT}`)
+);
