@@ -1,8 +1,19 @@
 // index.js
 import express from "express";
 import bodyParser from "body-parser";
-import { Connection, Keypair, PublicKey, clusterApiUrl, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { createMint, getOrCreateAssociatedTokenAccount, mintTo, transfer } from "@solana/spl-token";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  clusterApiUrl,
+  LAMPORTS_PER_SOL,
+} from "@solana/web3.js";
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  transfer,
+} from "@solana/spl-token";
 import bs58 from "bs58";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -11,7 +22,7 @@ dotenv.config();
 
 // ------------------- TWILIO SETUP -------------------
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-const TWILIO_NUMBER = "whatsapp:+14155238886"; // Your Twilio sandbox number
+const TWILIO_NUMBER = "whatsapp:+14155238886"; // Twilio sandbox number
 
 // ------------------- SOLANA SETUP -------------------
 const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
@@ -24,7 +35,7 @@ app.use(bodyParser.urlencoded({ extended: false }));
 // Temporary in-memory session (no DB)
 const sessions = {};
 
-// Helper function to send WhatsApp message
+// Helper: Send WhatsApp message
 async function sendMessage(to, body) {
   try {
     await client.messages.create({ from: TWILIO_NUMBER, to, body });
@@ -34,12 +45,18 @@ async function sendMessage(to, body) {
 }
 
 // ------------------- MAIN BOT LOGIC -------------------
-app.post("/webhook", async (req, res) => {
+app.post("/incomin", async (req, res) => {
   const from = req.body.From;
-  const msg = req.body.Body.trim();
+  const msg = req.body.Body?.trim();
   let user = sessions[from] || { stage: "start" };
 
   try {
+    // ✅ Quick test for connection
+    if (msg.toLowerCase() === "hi") {
+      await sendMessage(from, "👋 Hello! Chat.fun bot is online and ready on Devnet!");
+      return res.status(200).end();
+    }
+
     switch (user.stage) {
       case "start":
         await sendMessage(
@@ -60,10 +77,10 @@ app.post("/webhook", async (req, res) => {
 
           await sendMessage(
             from,
-            `✅ Wallet connected!\n💰 Balance: ${(balance / LAMPORTS_PER_SOL).toFixed(2)} SOL\n\nCommands:\n/launch — Launch token\n/send — Send SPL tokens`
+            `✅ Wallet connected!\n💰 Balance: ${(balance / LAMPORTS_PER_SOL).toFixed(2)} SOL\n\nCommands:\n/launch — Launch a new token\n/send — Send SPL tokens`
           );
         } catch {
-          await sendMessage(from, "❌ Invalid key. Try again with a valid base58 private key.");
+          await sendMessage(from, "❌ Invalid key. Please enter a valid base58 private key.");
         }
         break;
 
@@ -98,7 +115,7 @@ app.post("/webhook", async (req, res) => {
         const t = user.token;
         await sendMessage(
           from,
-          `⚙️ Confirm token:\nName: ${t.name}\nSymbol: ${t.symbol}\nStory: ${t.story}\nSupply: ${t.supply}\nDecimals: ${t.decimals}\n\nType "confirm" or "cancel".`
+          `⚙️ Confirm token details:\nName: ${t.name}\nSymbol: ${t.symbol}\nStory: ${t.story}\nSupply: ${t.supply}\nDecimals: ${t.decimals}\n\nType "confirm" or "cancel".`
         );
         break;
 
@@ -122,7 +139,7 @@ app.post("/webhook", async (req, res) => {
 
           await sendMessage(
             from,
-            `✅ Token Created!\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 Explorer:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
+            `✅ Token Created!\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
           );
           user.stage = "main_menu";
         }
@@ -174,14 +191,14 @@ app.post("/webhook", async (req, res) => {
     }
 
     sessions[from] = user;
-    res.sendStatus(200);
+    res.status(200).end();
   } catch (err) {
     console.error("❌ Error:", err);
     await sendMessage(from, "⚠️ An error occurred. Please try again later.");
-    res.sendStatus(500);
+    res.status(500).end();
   }
 });
 
 // ------------------- SERVER -------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Bot running on port ${PORT} (Devnet)`));
+app.listen(PORT, () => console.log(`✅ Chat.fun bot running on port ${PORT} (Devnet)`));
