@@ -1,11 +1,19 @@
+/**
+ * Solana Token Launch WhatsApp Bot (Devnet)
+ * Flow:
+ * User: "launch token"
+ * Bot asks: name → symbol → story → supply → decimals → freeze authority → confirmation → deploys
+ */
+
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import bs58 from "bs58";
 import {
-  Keypair,
   Connection,
   clusterApiUrl,
+  Keypair,
+  PublicKey,
+  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   createMint,
@@ -14,215 +22,179 @@ import {
 } from "@solana/spl-token";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Twilio setup
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER || "whatsapp:+14155238886";
-const client = twilio();
-
-// Solana Devnet
-const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
-
-// In-memory users + tokens
-const users = {}; // { phone: { state, wallet, tempName, tempSymbol, tempStory, lastToken } }
-const tokens = {}; // { name: { mintAddress, symbol, story, owner } }
-
-function sendMainMenu() {
-  return (
-    "🔥 Welcome to Chat.fun (Solana Devnet)\n\n" +
-    "1️⃣ Launch Token\n" +
-    "2️⃣ Buy Token\n" +
-    "3️⃣ Sell Token\n" +
-    "4️⃣ My Wallet\n\n" +
-    "Reply with a number:"
-  );
-}
-
-async function tryImportWallet(from, rawText) {
-  try {
-    let keypair;
-    const text = rawText.trim();
-
-    try {
-      keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(text)));
-    } catch {
-      keypair = Keypair.fromSecretKey(bs58.decode(text));
-    }
-
-    users[from] = { ...users[from], wallet: keypair, state: "main" };
-
-    const lamports = await connection.getBalance(keypair.publicKey);
-    const balanceSol = lamports / 1e9;
-
-    return (
-      `✅ Wallet imported successfully on *Solana Devnet!*\n` +
-      `📍 Address: ${keypair.publicKey.toBase58()}\n` +
-      `💰 Balance: ${balanceSol.toFixed(4)} SOL\n\n` +
-      sendMainMenu()
-    );
-  } catch (err) {
-    console.error("Wallet import failed:", err);
-    return "❌ Invalid wallet format. Please paste a valid Solana private key.";
-  }
-}
-
-async function launchToken(from) {
-  const user = users[from];
-  if (!user?.wallet) return "⚠️ Please import your wallet first by typing 'hi'.";
-
-  const { wallet, tempName, tempSymbol, tempStory } = user;
-
-  try {
-    const mint = await createMint(connection, wallet, wallet.publicKey, null, 9);
-    const tokenAccount = await getOrCreateAssociatedTokenAccount(
-      connection,
-      wallet,
-      mint,
-      wallet.publicKey
-    );
-
-    await mintTo(
-      connection,
-      wallet,
-      mint,
-      tokenAccount.address,
-      wallet.publicKey,
-      1_000_000_000n // 1 billion supply
-    );
-
-    const mintAddress = mint.toBase58();
-    tokens[tempName.toLowerCase()] = {
-      mintAddress,
-      symbol: tempSymbol,
-      story: tempStory,
-      owner: from,
-    };
-
-    users[from].lastToken = mintAddress;
-    users[from].state = "main";
-
-    // 🔗 OPTIONAL: Trigger your n8n webhook for announcements
-    // await fetch("https://your-n8n-url/webhook/announce", {
-    //   method: "POST",
-    //   headers: { "Content-Type": "application/json" },
-    //   body: JSON.stringify({
-    //     name: tempName,
-    //     symbol: tempSymbol,
-    //     story: tempStory,
-    //     mintAddress,
-    //   }),
-    // });
-
-    return (
-      `🚀 *${tempName} ($${tempSymbol}) launched successfully!*\n\n` +
-      `📖 Story: ${tempStory}\n\n` +
-      `🪙 Mint Address: ${mintAddress}\n` +
-      `🌐 Explorer: https://explorer.solana.com/address/${mintAddress}?cluster=devnet\n\n` +
-      sendMainMenu()
-    );
-  } catch (err) {
-    console.error("Token launch failed:", err);
-    return "❌ Token launch failed. Please check your Devnet SOL and try again.";
-  }
-}
-
-async function handleIncoming(from, rawBody) {
-  const body = rawBody.trim();
-  const user = users[from] || { state: "onboarding" };
-
-  if (body.toLowerCase() === "hi" || body.toLowerCase() === "hello") {
-    users[from] = { state: "awaiting_import" };
-    return (
-      "👋 Welcome to Chat.fun (Solana Devnet Mode)\n" +
-      "Paste your Solana private key to import wallet.\n\n" +
-      "💧 Get free SOL: https://faucet.solana.com/"
-    );
-  }
-
-  if (user.state === "awaiting_import") return await tryImportWallet(from, body);
-
-  if (user.state === "main") {
-    switch (body) {
-      case "1":
-        users[from].state = "launch_token_name";
-        return "🚀 Enter your token name (e.g., SwiftFee):";
-      case "2":
-        users[from].state = "buy_token_query";
-        return "💸 Enter token name or address to buy:";
-      case "3":
-        return "🔁 Sell Token feature coming soon!";
-      case "4": {
-        const wallet = user.wallet;
-        const lamports = await connection.getBalance(wallet.publicKey);
-        const balanceSol = lamports / 1e9;
-        return (
-          `👛 Wallet Address: ${wallet.publicKey.toBase58()}\n` +
-          `💰 Balance: ${balanceSol.toFixed(4)} SOL (Devnet)\n\n` +
-          sendMainMenu()
-        );
-      }
-      default:
-        return "❓ Invalid option. Please reply with 1, 2, 3, or 4.";
-    }
-  }
-
-  if (user.state === "launch_token_name") {
-    users[from].tempName = body;
-    users[from].state = "launch_token_symbol";
-    return "💲 Enter token symbol (e.g., SWF):";
-  }
-
-  if (user.state === "launch_token_symbol") {
-    users[from].tempSymbol = body.toUpperCase();
-    users[from].state = "launch_token_story";
-    return "📝 Enter a short story or description about your token:";
-  }
-
-  if (user.state === "launch_token_story") {
-    users[from].tempStory = body;
-    users[from].state = "launching";
-    return await launchToken(from);
-  }
-
-  if (user.state === "buy_token_query") {
-    const query = body.toLowerCase();
-    const token =
-      tokens[query] ||
-      Object.values(tokens).find((t) => t.mintAddress === body);
-    if (!token) {
-      users[from].state = "main";
-      return "❌ Token not found. Try again.";
-    }
-    users[from].state = "main";
-    return (
-      `💸 You bought 10 ${token.symbol} successfully (simulated)\n` +
-      `🪙 Mint: ${token.mintAddress}\n\n` +
-      sendMainMenu()
-    );
-  }
-
-  return "Type 'hi' to begin.";
-}
-
-// --- Twilio webhook ---
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
 
-app.post("/incoming", async (req, res) => {
+// =========================
+// 🔹 Inline Configuration
+// =========================
+const PORT = 3000;
+const TWILIO_ACCOUNT_SID = "your_twilio_account_sid_here";
+const TWILIO_AUTH_TOKEN = "your_twilio_auth_token_here";
+const TWILIO_WHATSAPP_NUMBER = "whatsapp:+14155238886"; // Twilio sandbox
+
+const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
+const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+const payer = Keypair.generate(); // Devnet wallet
+
+const sessions = new Map(); // session per user
+
+// =========================
+// 🔹 Webhook Endpoint
+// =========================
+app.post("/webhook", async (req, res) => {
   const from = req.body.From;
-  const body = req.body.Body;
-  const reply = await handleIncoming(from, body);
+  const body = req.body.Body.trim();
+  let session = sessions.get(from);
 
-  const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(reply);
-  res.set("Content-Type", "text/xml");
-  res.send(twiml.toString());
+  if (!session) {
+    session = { step: 0, data: {} };
+    sessions.set(from, session);
+  }
+
+  let reply = "";
+
+  try {
+    if (body.toLowerCase() === "launch token" && session.step === 0) {
+      reply = "🚀 Let's launch your token on *Solana Devnet*.\n\nEnter token name:";
+      session.step = 1;
+    } else {
+      switch (session.step) {
+        case 1:
+          session.data.name = body;
+          reply = "Enter symbol (e.g. SWF):";
+          session.step = 2;
+          break;
+
+        case 2:
+          session.data.symbol = body;
+          reply = "Describe your token’s story or purpose:";
+          session.step = 3;
+          break;
+
+        case 3:
+          session.data.story = body;
+          reply = "Enter total supply (e.g. 1000000000):";
+          session.step = 4;
+          break;
+
+        case 4:
+          if (isNaN(parseInt(body)) || parseInt(body) <= 0) {
+            reply = "❌ Invalid number. Enter a valid total supply (e.g. 1000000000):";
+            break;
+          }
+          session.data.supply = parseInt(body);
+          reply = "Enter decimals (usually 9):";
+          session.step = 5;
+          break;
+
+        case 5:
+          if (isNaN(parseInt(body))) {
+            reply = "❌ Invalid input. Enter decimals (usually 9):";
+            break;
+          }
+          session.data.decimals = parseInt(body);
+          reply = "Set a freeze authority? (yes/no)";
+          session.step = 6;
+          break;
+
+        case 6:
+          session.data.freezeAuthority = body.toLowerCase() === "yes";
+          reply =
+            "✅ Confirm launch with the following details:\n\n" +
+            `🏷️ Name: ${session.data.name}\n` +
+            `💠 Symbol: ${session.data.symbol}\n` +
+            `📖 Story: ${session.data.story}\n` +
+            `💰 Supply: ${session.data.supply}\n` +
+            `🔢 Decimals: ${session.data.decimals}\n` +
+            `❄️ Freeze Authority: ${session.data.freezeAuthority ? "Yes" : "No"}\n\n` +
+            "Type *confirm* to deploy or *cancel* to stop.";
+          session.step = 7;
+          break;
+
+        case 7:
+          if (body.toLowerCase() === "confirm") {
+            reply = "🚀 Launching your token on Solana Devnet...";
+            session.step = 8;
+            await sendWhatsApp(from, reply);
+
+            // =========================
+            // 🔹 Token Creation Process
+            // =========================
+            const mint = await createMint(
+              connection,
+              payer,
+              payer.publicKey,
+              session.data.freezeAuthority ? payer.publicKey : null,
+              session.data.decimals
+            );
+
+            const tokenAccount = await getOrCreateAssociatedTokenAccount(
+              connection,
+              payer,
+              mint,
+              payer.publicKey
+            );
+
+            const mintTxSig = await mintTo(
+              connection,
+              payer,
+              mint,
+              tokenAccount.address,
+              payer.publicKey,
+              session.data.supply * Math.pow(10, session.data.decimals)
+            );
+
+            const explorerLink = `https://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`;
+
+            reply =
+              `✅ *Token Successfully Launched!*\n\n` +
+              `🏷️ Name: ${session.data.name}\n` +
+              `💠 Symbol: ${session.data.symbol}\n` +
+              `💰 Supply: ${session.data.supply}\n` +
+              `🔢 Decimals: ${session.data.decimals}\n\n` +
+              `🪙 Mint Address:\n${mint.toBase58()}\n\n` +
+              `📜 Transaction Signature:\n${mintTxSig}\n\n` +
+              `🌐 Explorer Link:\n${explorerLink}\n\n` +
+              `_Note: This token is on Solana Devnet (test network)._`;
+
+            session.step = 9;
+          } else if (body.toLowerCase() === "cancel") {
+            reply = "❌ Token launch cancelled. Type *launch token* to start again.";
+            sessions.delete(from);
+          } else {
+            reply = "Please type *confirm* to deploy or *cancel* to stop.";
+          }
+          break;
+
+        default:
+          reply = "Type *launch token* to start a new token creation process.";
+          break;
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    reply = "⚠️ An error occurred while creating your token.";
+  }
+
+  await sendWhatsApp(from, reply);
+  res.sendStatus(200);
 });
 
-app.get("/", (req, res) => {
-  res.send("🚀 Chat.fun Devnet bot running successfully!");
-});
+// =========================
+// 🔹 Helper Function
+// =========================
+async function sendWhatsApp(to, message) {
+  await client.messages.create({
+    from: TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: message,
+  });
+}
 
-app.listen(PORT, () =>
-  console.log(`🚀 Chat.fun bot is live on port ${PORT} (Devnet Mode)`)
-);
+// =========================
+// 🔹 Start Server
+// =========================
+app.listen(PORT, () => {
+  console.log(`✅ WhatsApp Token Launch Bot running on port ${PORT}`);
+});
