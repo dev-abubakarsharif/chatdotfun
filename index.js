@@ -5,146 +5,183 @@ import { Connection, Keypair, PublicKey, clusterApiUrl, LAMPORTS_PER_SOL } from 
 import { createMint, getOrCreateAssociatedTokenAccount, mintTo, transfer } from "@solana/spl-token";
 import bs58 from "bs58";
 import twilio from "twilio";
+import dotenv from "dotenv";
 
-// Twilio setup (no .env)
-const client = twilio("ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "your_auth_token"); // Replace with yours
-const TWILIO_NUMBER = "whatsapp:+14155238886";
+dotenv.config();
 
-// Solana setup
+// ------------------- TWILIO SETUP -------------------
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const TWILIO_NUMBER = "whatsapp:+14155238886"; // Your Twilio sandbox number
+
+// ------------------- SOLANA SETUP -------------------
 const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
 
-// Express setup
+// ------------------- EXPRESS SETUP -------------------
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
 
-// Session store
+// Temporary in-memory session (no DB)
 const sessions = {};
 
-// Helper to send WhatsApp messages
+// Helper function to send WhatsApp message
 async function sendMessage(to, body) {
-  await client.messages.create({ from: TWILIO_NUMBER, to, body });
+  try {
+    await client.messages.create({ from: TWILIO_NUMBER, to, body });
+  } catch (error) {
+    console.error("Twilio send error:", error.message);
+  }
 }
 
-// WhatsApp bot handler
+// ------------------- MAIN BOT LOGIC -------------------
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
   const msg = req.body.Body.trim();
-  const user = sessions[from] || { stage: "start" };
+  let user = sessions[from] || { stage: "start" };
 
   try {
-    // 🧩 Step 1: Onboarding
-    if (user.stage === "start") {
-      await sendMessage(
-        from,
-        `🚀 Welcome to Chat.fun, the wildest way to launch and trade tokens on Solana!\n\n⚠️ Before we start, connect your wallet.\nEnter your private key below 👇`
-      );
-      user.stage = "awaiting_wallet";
-    }
-
-    // 🧩 Step 2: Connect wallet
-    else if (user.stage === "awaiting_wallet") {
-      try {
-        const secretKey = bs58.decode(msg);
-        const keypair = Keypair.fromSecretKey(secretKey);
-        const balance = await connection.getBalance(keypair.publicKey);
-        const sol = (balance / LAMPORTS_PER_SOL).toFixed(2);
-
-        user.wallet = keypair;
-        user.stage = "main_menu";
-
+    switch (user.stage) {
+      case "start":
         await sendMessage(
           from,
-          `✅ Wallet connected successfully!\nBalance: ${sol} SOL\n\nYou’re ready to cook, anon 🔥\n\nCommands:\n/launch — Launch Token\n/buy — Buy Token\n/send — Send SPL Tokens`
+          `🚀 Welcome to Chat.fun!\nLaunch and send tokens on Solana Devnet.\n\nPlease enter your private key (base58):`
         );
-      } catch (err) {
-        await sendMessage(from, "❌ Invalid key format. Please paste a valid base58 private key.");
-      }
-    }
+        user.stage = "awaiting_wallet";
+        break;
 
-    // 🧩 Step 3: Token Launch Flow
-    else if (msg.toLowerCase() === "/launch" && user.stage === "main_menu") {
-      user.stage = "launch_name";
-      await sendMessage(from, "Let’s drop some heat 🔥\nEnter your token name:");
-    } else if (user.stage === "launch_name") {
-      user.token = { name: msg };
-      user.stage = "launch_symbol";
-      await sendMessage(from, "Enter your token symbol (e.g. SWF):");
-    } else if (user.stage === "launch_symbol") {
-      user.token.symbol = msg;
-      user.stage = "launch_story";
-      await sendMessage(from, "Describe your token’s story or purpose:");
-    } else if (user.stage === "launch_story") {
-      user.token.story = msg;
-      user.stage = "launch_supply";
-      await sendMessage(from, "Enter total supply (e.g. 1000000000):");
-    } else if (user.stage === "launch_supply") {
-      user.token.supply = parseInt(msg);
-      user.stage = "launch_decimals";
-      await sendMessage(from, "Enter decimals (usually 9):");
-    } else if (user.stage === "launch_decimals") {
-      user.token.decimals = parseInt(msg);
-      user.stage = "launch_confirm";
-      const t = user.token;
-      await sendMessage(
-        from,
-        `🧠 Confirm launch:\n\nName: ${t.name}\nSymbol: ${t.symbol}\nStory: ${t.story}\nSupply: ${t.supply}\nDecimals: ${t.decimals}\n\nType "confirm" to deploy or "cancel" to stop.`
-      );
-    } else if (msg.toLowerCase() === "confirm" && user.stage === "launch_confirm") {
-      const kp = user.wallet;
-      const mint = await createMint(connection, kp, kp.publicKey, null, user.token.decimals);
-      const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
-      await mintTo(connection, kp, mint, ata.address, kp, user.token.supply * 10 ** user.token.decimals);
+      case "awaiting_wallet":
+        try {
+          const secretKey = bs58.decode(msg);
+          const keypair = Keypair.fromSecretKey(secretKey);
+          const balance = await connection.getBalance(keypair.publicKey);
 
-      await sendMessage(
-        from,
-        `✅ Token *${user.token.name}* ($${user.token.symbol}) is LIVE on Devnet!\nMint Address: ${mint.toBase58()}\nExplorer: https://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
-      );
-      user.stage = "main_menu";
-    } else if (msg.toLowerCase() === "cancel" && user.stage === "launch_confirm") {
-      await sendMessage(from, "❌ Launch cancelled. No SOL deducted. No token created.");
-      user.stage = "main_menu";
-    }
+          user.wallet = keypair;
+          user.stage = "main_menu";
 
-    // 🧩 Step 4: Send Tokens
-    else if (msg.toLowerCase() === "/send" && user.stage === "main_menu") {
-      user.stage = "awaiting_send_mint";
-      await sendMessage(from, "Enter the token mint address to send:");
-    } else if (user.stage === "awaiting_send_mint") {
-      user.transfer = { mint: msg };
-      user.stage = "awaiting_send_receiver";
-      await sendMessage(from, "Enter receiver wallet address:");
-    } else if (user.stage === "awaiting_send_receiver") {
-      user.transfer.receiver = msg;
-      user.stage = "awaiting_send_amount";
-      await sendMessage(from, "Enter amount to send:");
-    } else if (user.stage === "awaiting_send_amount") {
-      const mintPubkey = new PublicKey(user.transfer.mint);
-      const receiverPubkey = new PublicKey(user.transfer.receiver);
-      const amount = parseInt(msg);
+          await sendMessage(
+            from,
+            `✅ Wallet connected!\n💰 Balance: ${(balance / LAMPORTS_PER_SOL).toFixed(2)} SOL\n\nCommands:\n/launch — Launch token\n/send — Send SPL tokens`
+          );
+        } catch {
+          await sendMessage(from, "❌ Invalid key. Try again with a valid base58 private key.");
+        }
+        break;
 
-      const fromAta = await getOrCreateAssociatedTokenAccount(
-        connection,
-        user.wallet,
-        mintPubkey,
-        user.wallet.publicKey
-      );
-      const toAta = await getOrCreateAssociatedTokenAccount(connection, user.wallet, mintPubkey, receiverPubkey);
+      // ------------------- TOKEN LAUNCH -------------------
+      case "launch_name":
+        user.token.name = msg;
+        user.stage = "launch_symbol";
+        await sendMessage(from, "Enter your token symbol (e.g., SWF):");
+        break;
 
-      await transfer(connection, user.wallet, fromAta.address, toAta.address, user.wallet, amount);
+      case "launch_symbol":
+        user.token.symbol = msg;
+        user.stage = "launch_story";
+        await sendMessage(from, "Describe your token's story:");
+        break;
 
-      await sendMessage(from, `✅ Sent ${amount} tokens to ${receiverPubkey.toBase58()} successfully on Devnet.`);
-      user.stage = "main_menu";
+      case "launch_story":
+        user.token.story = msg;
+        user.stage = "launch_supply";
+        await sendMessage(from, "Enter total supply (e.g., 1000000):");
+        break;
+
+      case "launch_supply":
+        user.token.supply = parseInt(msg);
+        user.stage = "launch_decimals";
+        await sendMessage(from, "Enter decimals (usually 9):");
+        break;
+
+      case "launch_decimals":
+        user.token.decimals = parseInt(msg);
+        user.stage = "launch_confirm";
+        const t = user.token;
+        await sendMessage(
+          from,
+          `⚙️ Confirm token:\nName: ${t.name}\nSymbol: ${t.symbol}\nStory: ${t.story}\nSupply: ${t.supply}\nDecimals: ${t.decimals}\n\nType "confirm" or "cancel".`
+        );
+        break;
+
+      default:
+        // ------------------- MAIN MENU COMMANDS -------------------
+        if (msg.toLowerCase() === "/launch" && user.stage === "main_menu") {
+          user.stage = "launch_name";
+          user.token = {};
+          await sendMessage(from, "Let's launch your token!\nEnter token name:");
+        }
+
+        else if (msg.toLowerCase() === "confirm" && user.stage === "launch_confirm") {
+          const kp = user.wallet;
+          const t = user.token;
+
+          const mint = await createMint(connection, kp, kp.publicKey, null, t.decimals);
+          const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
+          const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
+
+          await mintTo(connection, kp, mint, ata.address, kp, Number(amount));
+
+          await sendMessage(
+            from,
+            `✅ Token Created!\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 Explorer:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
+          );
+          user.stage = "main_menu";
+        }
+
+        else if (msg.toLowerCase() === "cancel" && user.stage === "launch_confirm") {
+          user.stage = "main_menu";
+          await sendMessage(from, "❌ Token launch cancelled.");
+        }
+
+        // ------------------- SEND TOKEN -------------------
+        else if (msg.toLowerCase() === "/send" && user.stage === "main_menu") {
+          user.stage = "awaiting_send_mint";
+          await sendMessage(from, "Enter token mint address:");
+        } else if (user.stage === "awaiting_send_mint") {
+          user.transfer = { mint: msg };
+          user.stage = "awaiting_send_receiver";
+          await sendMessage(from, "Enter receiver wallet address:");
+        } else if (user.stage === "awaiting_send_receiver") {
+          user.transfer.receiver = msg;
+          user.stage = "awaiting_send_amount";
+          await sendMessage(from, "Enter amount to send:");
+        } else if (user.stage === "awaiting_send_amount") {
+          const mintPubkey = new PublicKey(user.transfer.mint);
+          const receiverPubkey = new PublicKey(user.transfer.receiver);
+          const amount = Number(msg);
+
+          const fromAta = await getOrCreateAssociatedTokenAccount(
+            connection,
+            user.wallet,
+            mintPubkey,
+            user.wallet.publicKey
+          );
+          const toAta = await getOrCreateAssociatedTokenAccount(
+            connection,
+            user.wallet,
+            mintPubkey,
+            receiverPubkey
+          );
+
+          await transfer(connection, user.wallet, fromAta.address, toAta.address, user.wallet, amount);
+          user.stage = "main_menu";
+
+          await sendMessage(from, `✅ Sent ${amount} tokens to ${receiverPubkey.toBase58()} on Devnet.`);
+        }
+
+        else {
+          await sendMessage(from, "❓ Unknown command. Use /launch or /send.");
+        }
     }
 
     sessions[from] = user;
     res.sendStatus(200);
   } catch (err) {
-    console.error("Error:", err);
+    console.error("❌ Error:", err);
+    await sendMessage(from, "⚠️ An error occurred. Please try again later.");
     res.sendStatus(500);
   }
 });
 
-// Server start
+// ------------------- SERVER -------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Bot running on port ${PORT} (Devnet)`));
