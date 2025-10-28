@@ -15,6 +15,15 @@ import {
   transfer,
   getMint,
 } from "@solana/spl-token";
+import {
+  createMetadataAccountV3,
+} from "@metaplex-foundation/mpl-token-metadata";
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { 
+  keypairIdentity, 
+  publicKey as umiPublicKey,
+  createSignerFromKeypair,
+} from "@metaplex-foundation/umi";
 import bs58 from "bs58";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -135,17 +144,44 @@ app.post("/incoming", async (req, res) => {
           const kp = user.wallet;
           const t = user.token;
 
-          await sendMessage(from, "⏳ Creating your token...");
+          await sendMessage(from, "⏳ Creating your token with metadata...");
 
+          // Create the mint
           const mint = await createMint(connection, kp, kp.publicKey, null, t.decimals);
+          
+          // Create UMI instance for Metaplex
+          const umi = createUmi(connection.rpcEndpoint);
+          const umiKeypair = umi.eddsa.createKeypairFromSecretKey(kp.secretKey);
+          const signer = createSignerFromKeypair(umi, umiKeypair);
+          umi.use(keypairIdentity(signer));
+
+          // Create metadata
+          await createMetadataAccountV3(umi, {
+            mint: umiPublicKey(mint.toBase58()),
+            mintAuthority: signer,
+            payer: signer,
+            updateAuthority: signer.publicKey,
+            data: {
+              name: t.name,
+              symbol: t.symbol,
+              uri: "", // You can add IPFS/Arweave link later
+              sellerFeeBasisPoints: 0,
+              creators: null,
+              collection: null,
+              uses: null,
+            },
+            isMutable: true,
+            collectionDetails: null,
+          }).sendAndConfirm(umi);
+
+          // Mint tokens
           const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
           const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
-
           await mintTo(connection, kp, mint, ata.address, kp, amount);
 
           await sendMessage(
             from,
-            `✅ Token Created!\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
+            `✅ Token Created with Metadata!\n${t.name} (${t.symbol})\n📖 ${t.story}\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
           );
           user.stage = "main_menu";
         } else if (msg.toLowerCase() === "cancel") {
