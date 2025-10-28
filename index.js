@@ -13,6 +13,7 @@ import {
   getOrCreateAssociatedTokenAccount,
   mintTo,
   transfer,
+  getMint,
 } from "@solana/spl-token";
 import bs58 from "bs58";
 import twilio from "twilio";
@@ -45,7 +46,7 @@ async function sendMessage(to, body) {
 }
 
 // ------------------- MAIN BOT LOGIC -------------------
-app.post("/incomin", async (req, res) => {
+app.post("/incoming", async (req, res) => {
   const from = req.body.From;
   const msg = req.body.Body?.trim();
   let user = sessions[from] || { stage: "start" };
@@ -104,13 +105,23 @@ app.post("/incomin", async (req, res) => {
         break;
 
       case "launch_supply":
-        user.token.supply = parseInt(msg);
+        const supply = parseInt(msg);
+        if (isNaN(supply) || supply <= 0) {
+          await sendMessage(from, "❌ Invalid supply. Please enter a positive number:");
+          break;
+        }
+        user.token.supply = supply;
         user.stage = "launch_decimals";
         await sendMessage(from, "Enter decimals (usually 9):");
         break;
 
       case "launch_decimals":
-        user.token.decimals = parseInt(msg);
+        const decimals = parseInt(msg);
+        if (isNaN(decimals) || decimals < 0 || decimals > 9) {
+          await sendMessage(from, "❌ Invalid decimals. Please enter a number between 0-9:");
+          break;
+        }
+        user.token.decimals = decimals;
         user.stage = "launch_confirm";
         const t = user.token;
         await sendMessage(
@@ -119,52 +130,74 @@ app.post("/incomin", async (req, res) => {
         );
         break;
 
-      default:
-        // ------------------- MAIN MENU COMMANDS -------------------
-        if (msg.toLowerCase() === "/launch" && user.stage === "main_menu") {
-          user.stage = "launch_name";
-          user.token = {};
-          await sendMessage(from, "Let's launch your token!\nEnter token name:");
-        }
-
-        else if (msg.toLowerCase() === "confirm" && user.stage === "launch_confirm") {
+      case "launch_confirm":
+        if (msg.toLowerCase() === "confirm") {
           const kp = user.wallet;
           const t = user.token;
+
+          await sendMessage(from, "⏳ Creating your token...");
 
           const mint = await createMint(connection, kp, kp.publicKey, null, t.decimals);
           const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
           const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
 
-          await mintTo(connection, kp, mint, ata.address, kp, Number(amount));
+          await mintTo(connection, kp, mint, ata.address, kp, amount);
 
           await sendMessage(
             from,
             `✅ Token Created!\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
           );
           user.stage = "main_menu";
-        }
-
-        else if (msg.toLowerCase() === "cancel" && user.stage === "launch_confirm") {
+        } else if (msg.toLowerCase() === "cancel") {
           user.stage = "main_menu";
           await sendMessage(from, "❌ Token launch cancelled.");
+        } else {
+          await sendMessage(from, "Please type 'confirm' or 'cancel'.");
         }
+        break;
 
-        // ------------------- SEND TOKEN -------------------
-        else if (msg.toLowerCase() === "/send" && user.stage === "main_menu") {
-          user.stage = "awaiting_send_mint";
-          await sendMessage(from, "Enter token mint address:");
-        } else if (user.stage === "awaiting_send_mint") {
+      // ------------------- SEND TOKEN -------------------
+      case "awaiting_send_mint":
+        try {
+          // Validate mint address
+          new PublicKey(msg);
           user.transfer = { mint: msg };
           user.stage = "awaiting_send_receiver";
           await sendMessage(from, "Enter receiver wallet address:");
-        } else if (user.stage === "awaiting_send_receiver") {
+        } catch {
+          await sendMessage(from, "❌ Invalid mint address. Please enter a valid Solana address:");
+        }
+        break;
+
+      case "awaiting_send_receiver":
+        try {
+          // Validate receiver address
+          new PublicKey(msg);
           user.transfer.receiver = msg;
           user.stage = "awaiting_send_amount";
           await sendMessage(from, "Enter amount to send:");
-        } else if (user.stage === "awaiting_send_amount") {
+        } catch {
+          await sendMessage(from, "❌ Invalid wallet address. Please enter a valid Solana address:");
+        }
+        break;
+
+      case "awaiting_send_amount":
+        try {
           const mintPubkey = new PublicKey(user.transfer.mint);
           const receiverPubkey = new PublicKey(user.transfer.receiver);
-          const amount = Number(msg);
+          const amountInput = parseFloat(msg);
+
+          if (isNaN(amountInput) || amountInput <= 0) {
+            await sendMessage(from, "❌ Invalid amount. Please enter a positive number:");
+            break;
+          }
+
+          await sendMessage(from, "⏳ Processing transfer...");
+
+          // Get mint info to determine decimals
+          const mintInfo = await getMint(connection, mintPubkey);
+          const decimals = mintInfo.decimals;
+          const amount = BigInt(Math.floor(amountInput * (10 ** decimals)));
 
           const fromAta = await getOrCreateAssociatedTokenAccount(
             connection,
@@ -182,12 +215,30 @@ app.post("/incomin", async (req, res) => {
           await transfer(connection, user.wallet, fromAta.address, toAta.address, user.wallet, amount);
           user.stage = "main_menu";
 
-          await sendMessage(from, `✅ Sent ${amount} tokens to ${receiverPubkey.toBase58()} on Devnet.`);
+          await sendMessage(from, `✅ Sent ${amountInput} tokens to ${receiverPubkey.toBase58()} on Devnet.`);
+        } catch (error) {
+          console.error("Transfer error:", error);
+          await sendMessage(from, "❌ Transfer failed. Please check the addresses and try again.");
+          user.stage = "main_menu";
         }
+        break;
 
-        else {
+      // ------------------- MAIN MENU COMMANDS -------------------
+      case "main_menu":
+        if (msg.toLowerCase() === "/launch") {
+          user.stage = "launch_name";
+          user.token = {};
+          await sendMessage(from, "Let's launch your token!\nEnter token name:");
+        } else if (msg.toLowerCase() === "/send") {
+          user.stage = "awaiting_send_mint";
+          await sendMessage(from, "Enter token mint address:");
+        } else {
           await sendMessage(from, "❓ Unknown command. Use /launch or /send.");
         }
+        break;
+
+      default:
+        await sendMessage(from, "❓ Unknown command. Use /launch or /send.");
     }
 
     sessions[from] = user;
