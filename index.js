@@ -16,14 +16,16 @@ import {
   getMint,
 } from "@solana/spl-token";
 import {
-  createMetadataAccountV3,
+  createV1,
+  TokenStandard,
 } from "@metaplex-foundation/mpl-token-metadata";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
 import { 
   keypairIdentity, 
-  publicKey as umiPublicKey,
-  createSignerFromKeypair,
+  generateSigner,
+  percentAmount,
 } from "@metaplex-foundation/umi";
+import { fromWeb3JsKeypair } from "@metaplex-foundation/umi-web3js-adapters";
 import bs58 from "bs58";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -146,44 +148,61 @@ app.post("/incoming", async (req, res) => {
 
           await sendMessage(from, "⏳ Creating your token with metadata...");
 
-          // Create the mint
-          const mint = await createMint(connection, kp, kp.publicKey, null, t.decimals);
-          
-          // Create UMI instance for Metaplex
-          const umi = createUmi(connection.rpcEndpoint);
-          const umiKeypair = umi.eddsa.createKeypairFromSecretKey(kp.secretKey);
-          const signer = createSignerFromKeypair(umi, umiKeypair);
-          umi.use(keypairIdentity(signer));
+          try {
+            // Create UMI instance
+            const umi = createUmi(connection.rpcEndpoint);
+            const umiKeypair = fromWeb3JsKeypair(kp);
+            umi.use(keypairIdentity(umiKeypair));
 
-          // Create metadata
-          await createMetadataAccountV3(umi, {
-            mint: umiPublicKey(mint.toBase58()),
-            mintAuthority: signer,
-            payer: signer,
-            updateAuthority: signer.publicKey,
-            data: {
+            // Generate a new mint signer
+            const mintSigner = generateSigner(umi);
+
+            // Create token with metadata using Metaplex
+            await createV1(umi, {
+              mint: mintSigner,
+              authority: umiKeypair,
               name: t.name,
               symbol: t.symbol,
-              uri: "", // You can add IPFS/Arweave link later
-              sellerFeeBasisPoints: 0,
-              creators: null,
-              collection: null,
-              uses: null,
-            },
-            isMutable: true,
-            collectionDetails: null,
-          }).sendAndConfirm(umi);
+              uri: "",
+              sellerFeeBasisPoints: percentAmount(0),
+              decimals: t.decimals,
+              tokenStandard: TokenStandard.Fungible,
+            }).sendAndConfirm(umi);
 
-          // Mint tokens
-          const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
-          const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
-          await mintTo(connection, kp, mint, ata.address, kp, amount);
+            // Convert UMI mint to web3.js PublicKey
+            const mintPubkey = new PublicKey(mintSigner.publicKey);
 
-          await sendMessage(
-            from,
-            `✅ Token Created with Metadata!\n${t.name} (${t.symbol})\n📖 ${t.story}\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
-          );
-          user.stage = "main_menu";
+            // Mint tokens to creator
+            const ata = await getOrCreateAssociatedTokenAccount(
+              connection, 
+              kp, 
+              mintPubkey, 
+              kp.publicKey
+            );
+            const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
+            await mintTo(connection, kp, mintPubkey, ata.address, kp, amount);
+
+            await sendMessage(
+              from,
+              `✅ Token Created with Metadata!\n${t.name} ($${t.symbol})\n📖 ${t.story}\nMint: ${mintPubkey.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mintPubkey.toBase58()}?cluster=devnet`
+            );
+            user.stage = "main_menu";
+          } catch (metaplexError) {
+            console.error("Metaplex error:", metaplexError);
+            await sendMessage(from, "⚠️ Metadata creation failed. Creating basic token instead...");
+            
+            // Fallback: Create token without metadata
+            const mint = await createMint(connection, kp, kp.publicKey, null, t.decimals);
+            const ata = await getOrCreateAssociatedTokenAccount(connection, kp, mint, kp.publicKey);
+            const amount = BigInt(t.supply) * BigInt(10 ** t.decimals);
+            await mintTo(connection, kp, mint, ata.address, kp, amount);
+
+            await sendMessage(
+              from,
+              `✅ Token Created (without metadata)\n${t.name} ($${t.symbol})\nMint: ${mint.toBase58()}\n🔗 View:\nhttps://explorer.solana.com/address/${mint.toBase58()}?cluster=devnet`
+            );
+            user.stage = "main_menu";
+          }
         } else if (msg.toLowerCase() === "cancel") {
           user.stage = "main_menu";
           await sendMessage(from, "❌ Token launch cancelled.");
